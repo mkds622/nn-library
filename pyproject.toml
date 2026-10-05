@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 name = "bonsai-nn-library"
 description = "Common PyTorch utilities for research projects on neural networks."
 readme = "README.md"
-requires-python = ">= 3.13"
+requires-python = ">= 3.12"
 version = "0.7.2"
 license = { text = "MIT" }
 authors = [
@@ -38,6 +38,7 @@ dependencies = [
     "tabulate",
     "torchmetrics",
     "tqdm",
+    "typing_extensions; python_version < '3.13'",
 ]
 
 [project.optional-dependencies]

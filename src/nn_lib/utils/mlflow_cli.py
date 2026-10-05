@@ -15,7 +15,10 @@ Deprecated (kept because existing projects depend on them; superseded by
 import os
 import pickle
 import tempfile
-import warnings
+try:
+    from warnings import deprecated          # Python 3.13+
+except ImportError:
+    from typing_extensions import deprecated # 3.9 to 3.12
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Union, Optional, Any, Literal, Iterable, Generator
@@ -170,7 +173,7 @@ def search_single_run_by_params(
     return runs[0]
 
 
-@warnings.deprecated(
+@deprecated(
     "run_registry contains better utilities for canonicalizing/serializing parameters"
 )
 def run_has_params(run: Run, params: Namespace, skip_keys: Optional[Iterable[str]] = None) -> bool:
@@ -273,7 +276,7 @@ def _iter_params_skip(
         yield nested_key, value
 
 
-@warnings.deprecated("Use flatten() and to_plain() in run_registry instead, if possible")
+@deprecated("Use flatten() and to_plain() in run_registry instead, if possible")
 def flatten_params(params: Namespace, skip_keys: Optional[Iterable[str]] = None) -> dict:
     """Flatten the given parameters, like Namespace.as_flat, but allow some keys to be skipped and
     returning as a dict.
