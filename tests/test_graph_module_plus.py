@@ -94,6 +94,22 @@ class DummyModuleWithDictOutput(nn.Module):
         out1 = self.linear1(x)
         return {"out": out1}
 
+class ShapeCheckedNet(nn.Module):
+    """A net that validates its input, like a vision transformer does.
+
+    The assertion consumes x and produces nothing, so the branch from x to the
+    assert has users but no path to the output.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 8)
+        self.fc2 = nn.Linear(8, 4)
+
+    def forward(self, x):
+        torch._assert(x.shape[1] == 8, "expected width 8")
+        return self.fc2(self.fc1(x) + x)
+
 
 class TestGraphModulePlus(ModuleTestCase):
 
@@ -562,6 +578,28 @@ class TestGraphModulePlus(ModuleTestCase):
         self.assertIn(noop_node, self.gm.graph.nodes)
         self.assertEqual(noop_node.args[0].name, "add_4")
         self.assertGreater(len(list(noop_node.users)), 0)
+    
+    def test_extract_subgraph_drops_unreachable_inputs(self):
+        """A half cut from the middle should take only the activation.
+
+        A traced model may compute something it never uses, such as a shape
+        check. That branch keeps the original input alive even after the input
+        has been moved to a mid-graph node, leaving the extracted half with a
+        parameter it does not need.
+        """
+        whole = GraphModulePlus.new_from_trace(ShapeCheckedNet().eval()).eval()
+        cut = "add"
+
+        self.assertIn(cut, [node.name for node in whole.graph.nodes])
+
+        upper = GraphModulePlus.new_from_copy(whole).extract_subgraph(output=cut).eval()
+        lower = GraphModulePlus.new_from_copy(whole).extract_subgraph(inputs=[cut]).eval()
+
+        self.assertEqual([node.name for node in lower.graph.nodes if node.op == "placeholder"], [cut])
+
+        x = torch.randn(2, 8)
+        with torch.no_grad():
+            self.assertTrue(torch.allclose(whole(x), lower(upper(x)), atol=1e-5))
 
 
 if __name__ == "__main__":

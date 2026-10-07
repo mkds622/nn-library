@@ -157,6 +157,7 @@ class GraphModulePlus(GraphModule):
             output = self.output_value
         new_module = GraphModulePlus.new_from_copy(self, name="Sub" + self.__class__.__name__)
         new_module.set_inputs_and_output(inputs, output)
+        new_module.prune_to_output()
         new_module.recompile()
         new_module.delete_all_unused_submodules()
         return new_module
@@ -364,6 +365,40 @@ class GraphModulePlus(GraphModule):
             for node in list(self.graph.nodes):
                 if node.op == "placeholder" and len(node.users) == 0:
                     self.graph.erase_node(node)
+
+        return self
+
+    def prune_to_output(self) -> Self:
+        """Erase every node with no path to the output.
+
+        eliminate_dead() removes nodes with no users, which is not the same
+        thing. A node can have users and still be unreachable from the output,
+        which happens when a traced model computes something it does not use,
+        such as a shape check. Those branches survive eliminate_dead(), and any
+        placeholder feeding one survives with them, leaving an extracted
+        subgraph with inputs it does not need.
+
+        Walks back from the output node, collects everything reachable, and
+        erases the rest in reverse topological order so that no node is removed
+        before its users.
+        """
+        output = next(node for node in self.graph.nodes if node.op == "output")
+
+        reachable, stack = {output}, [output]
+        while stack:
+            node = stack.pop()
+            for parent in node.all_input_nodes:
+                if parent not in reachable:
+                    reachable.add(parent)
+                    stack.append(parent)
+
+        for node in reversed(list(self.graph.nodes)):
+            if node not in reachable:
+                self.graph.erase_node(node)
+
+        self.graph.lint()
+        self.recompile()
+        self.delete_all_unused_submodules()
 
         return self
 
