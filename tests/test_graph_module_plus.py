@@ -1,3 +1,5 @@
+from typing import Optional
+
 import unittest
 from copy import deepcopy
 from warnings import catch_warnings
@@ -109,6 +111,22 @@ class ShapeCheckedNet(nn.Module):
     def forward(self, x):
         torch._assert(x.shape[1] == 8, "expected width 8")
         return self.fc2(self.fc1(x) + x)
+
+class OptionalArgsNet(nn.Module):
+    """A net whose forward takes optional arguments, as timm transformers do.
+
+    Traced, this records three placeholders whose defaults disagree, which is
+    what the shared-input merge used to refuse. The optional arguments are used
+    arithmetically so that they survive as real inputs, and their defaults are
+    the identity so that calling with the image alone is unchanged.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor, bias: float = 0.0, scale: float = 1.0):
+        return self.fc(x) * scale + bias
 
 
 class TestGraphModulePlus(ModuleTestCase):
@@ -600,6 +618,35 @@ class TestGraphModulePlus(ModuleTestCase):
         x = torch.randn(2, 8)
         with torch.no_grad():
             self.assertTrue(torch.allclose(whole(x), lower(upper(x)), atol=1e-5))
+    
+    def test_merge_keeps_inputs_that_cannot_be_shared(self):
+        """Merging a model whose forward takes optional arguments should succeed.
+
+        Placeholders that came from the same argument are one input and merge.
+        Placeholders from different arguments are not, and are carried through
+        as separate inputs rather than refused.
+        """
+        net = OptionalArgsNet().eval()
+        merged = GraphModulePlus.new_from_merge({"a": net}, rewire_inputs={}).eval()
+
+        names = [node.name for node in merged.graph.nodes if node.op == "placeholder"]
+        self.assertEqual(names, ["x", "bias", "scale"])
+
+        x = torch.randn(2, 8)
+        with torch.no_grad():
+            self.assertTrue(torch.allclose(net(x), merged(x), atol=1e-5))
+
+    def test_merge_of_single_input_models_is_unchanged(self):
+        """A model with one argument still merges to a single input named x."""
+        net = nn.Sequential(nn.Linear(8, 8), nn.ReLU()).eval()
+        merged = GraphModulePlus.new_from_merge({"a": net}, rewire_inputs={}).eval()
+
+        names = [node.name for node in merged.graph.nodes if node.op == "placeholder"]
+        self.assertEqual(names, ["x"])
+
+        x = torch.randn(2, 8)
+        with torch.no_grad():
+            self.assertTrue(torch.allclose(net(x), merged(x), atol=1e-5))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 from typing import Iterable, List, Optional, Any, assert_never, Self, Callable
-
+import inspect
 import pydot
 import torch
 from torch import nn
@@ -80,6 +80,7 @@ class GraphModulePlus(GraphModule):
         # By default, the output of the new module will be the output of the last module in the
         # dict. If this is not the desired behavior, the output can be set manually after.
         new_output_value_node = None
+        inputs_per_module: list[list[Node]] = []
         for name, module in modules.items():
             if auto_trace:
                 module = GraphModulePlus.new_from_trace(module)
@@ -89,8 +90,16 @@ class GraphModulePlus(GraphModule):
                     # If we're merging a GraphModule, copy it by copying the underlying graph
                     # after adding a prefix to all nodes. The prefix is required so that the
                     # nodes' args and targets point to attributes of the root dict.
+                    prefixed_graph = prefix_all_nodes(module.graph, name)
                     new_output_value_node = new_graph.graph_copy(
-                        prefix_all_nodes(module.graph, name), val_map=new_node_lookup
+                        prefixed_graph, val_map=new_node_lookup
+                    )
+                    inputs_per_module.append(
+                        [
+                            new_node_lookup[node]
+                            for node in prefixed_graph.nodes
+                            if node.op == "placeholder"
+                        ]
                     )
                 case nn.Module():
                     # We should only get here if auto_trace=False and module was a plain-old
@@ -99,6 +108,7 @@ class GraphModulePlus(GraphModule):
                     with new_graph.inserting_after():
                         new_node = new_graph.call_module(name, args=(), kwargs={})
                     new_output_value_node = new_node
+                    inputs_per_module.append([])
                 case _:
                     assert_never(module)
 
@@ -108,14 +118,53 @@ class GraphModulePlus(GraphModule):
         # their prefixes, which means the user will have to specify the prefixed input node names
         # when rewiring.
         if share_inputs:
-            existing_inputs = [node for node in new_graph.nodes if node.op == "placeholder"]
-            with new_graph.inserting_before():
-                shared_input_node = new_graph.placeholder(
-                    "x", *validate_common_placeholder_attrs(existing_inputs)
+            # Group placeholders by position. The first argument of every module is one
+            # input, the second of every module the next, and so on. Position is what makes
+            # two arguments the same input; the names are whatever each author happened to
+            # pick, and nn.Sequential calling its argument "input" while another module
+            # calls it "x" does not make them different inputs.
+            width = max((len(inputs) for inputs in inputs_per_module), default=0)
+            groups = [
+                [inputs[index] for inputs in inputs_per_module if index < len(inputs)]
+                for index in range(width)
+            ] or [[]]
+
+            # The first input keeps the name "x", as before, so nothing that refers to it
+            # by name changes. Later ones take the name they had in the module they came
+            # from, with the prefix removed.
+            prefixes = tuple(f"{name}_" for name in modules)
+
+            def unprefixed(node: Node, fallback: str) -> str:
+                """Recover the name a placeholder had before the merge prefixed it."""
+                for prefix in prefixes:
+                    if node.name.startswith(prefix):
+                        return node.name[len(prefix) :]
+                return fallback
+
+            named = [
+                ("x" if index == 0 else unprefixed(group[0], f"input_{index}"), group)
+                for index, group in enumerate(groups)
+            ]
+
+            # A parameter without a default cannot follow one that has a default, and fx
+            # orders parameters by their position in the graph, so the placeholders without
+            # defaults have to be created first.
+            resolved = [
+                (name, *validate_common_placeholder_attrs(group), group) for name, group in named
+            ]
+            resolved.sort(key=lambda item: item[2] is not inspect.Signature.empty)
+
+            previous = None
+            for name, type_expr, default_value, group in resolved:
+                insertion = (
+                    new_graph.inserting_before()
+                    if previous is None
+                    else new_graph.inserting_after(previous)
                 )
-            for node in existing_inputs:
-                if node.op == "placeholder":
-                    node.replace_all_uses_with(shared_input_node)
+                with insertion:
+                    previous = new_graph.placeholder(name, type_expr, default_value)
+                for node in group:
+                    node.replace_all_uses_with(previous)
                     new_graph.erase_node(node)
 
         # Create the new GraphModulePlus object, taking attributes from the modules dict; nodes with
