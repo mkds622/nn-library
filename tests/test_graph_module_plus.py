@@ -647,6 +647,26 @@ class TestGraphModulePlus(ModuleTestCase):
         x = torch.randn(2, 8)
         with torch.no_grad():
             self.assertTrue(torch.allclose(net(x), merged(x), atol=1e-5))
+    
+    def test_extract_subgraph_orders_inputs_so_the_forward_compiles(self):
+        """A new input must be placed ahead of any parameter that has a default.
+
+        extract_subgraph turns a mid-graph node into a placeholder, inserting it
+        where that node sat, which is after the model's own placeholders. When
+        the model's forward takes optional arguments, the regenerated forward
+        then has a parameter without a default following ones that have
+        defaults, which is a syntax error.
+        """
+        net = OptionalArgsNet().eval()
+        gm = GraphModulePlus.new_from_trace(net).eval()
+        cut = "mul"
+
+        self.assertIn(cut, [node.name for node in gm.graph.nodes])
+
+        lower = GraphModulePlus.new_from_copy(gm).extract_subgraph(inputs=[cut]).eval()
+
+        names = [node.name for node in lower.graph.nodes if node.op == "placeholder"]
+        self.assertEqual(names[0], cut)
 
 
 if __name__ == "__main__":

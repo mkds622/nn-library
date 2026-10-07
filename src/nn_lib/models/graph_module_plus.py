@@ -484,6 +484,25 @@ class GraphModulePlus(GraphModule):
                         new_placeholder.name = node.name
                     dont_remove.append(new_placeholder)
 
+        # fx orders a regenerated forward's parameters by the position of their placeholders in
+        # the graph, and Python does not allow a parameter without a default to follow one that
+        # has a default. A placeholder created above is inserted where the node it replaced sat,
+        # which is after any placeholders the model already had, so a model whose forward takes
+        # optional arguments regenerates a forward that does not compile. Move the placeholders
+        # without defaults to the front, which is always safe because a placeholder has no
+        # inputs of its own and so cannot be moved above anything it depends on.
+        placeholders = [node for node in self.graph.nodes if node.op == "placeholder"]
+        required = [node for node in placeholders if not node.args]
+        if required != placeholders[: len(required)]:
+            anchor = None
+            for node in required:
+                if anchor is None:
+                    first = next(iter(self.graph.nodes))
+                    if node is not first:
+                        first.prepend(node)
+                else:
+                    anchor.append(node)
+                anchor = node
         self._clean_up_and_recompile()
 
         return self
